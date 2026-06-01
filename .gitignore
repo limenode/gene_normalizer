@@ -1,0 +1,8 @@
+# cargo target
+/target
+
+# vscode
+*.code-workspace
+
+# data directory
+/data
