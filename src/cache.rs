@@ -41,6 +41,28 @@ pub fn stream_gene_tsv_lines() -> TsvStream {
     }
 }
 
+pub fn print_tsv_info(n_data_lines: usize) {
+    let tsv_stream = stream_gene_tsv_lines();
+
+    log::debug!("Metadata lines:");
+    for line in tsv_stream.metadata {
+        log::debug!("{}", line);
+    }
+
+    log::debug!("\nHeader line:");
+    log::debug!("{}", tsv_stream.header.join("\t"));
+
+    let mut counter = 0;
+    log::debug!("\nData lines: (Showing first {} lines)", n_data_lines);
+    for line in tsv_stream.rows {
+        log::debug!("{}", line);
+        counter += 1;
+        if counter >= n_data_lines {
+            break;
+        }
+    }
+}
+
 pub fn build_cache(db_path: &str) -> anyhow::Result<()> {
     let tsv = stream_gene_tsv_lines();
 
@@ -182,13 +204,13 @@ pub fn lookup_many(
     let rows = stmt.query_map(rusqlite::params_from_iter(aliases.iter()), |row| {
         let alias: String = row.get(0)?;
         let count = row.as_ref().column_count();
-        let gene: rusqlite::Result<Vec<String>> = (1..count).map(|i| row.get(i)).collect();
-        Ok((alias, gene?))
+        let gene_record: rusqlite::Result<Vec<String>> = (1..count).map(|i| row.get(i)).collect();
+        Ok((alias, gene_record?))
     })?;
 
     for row in rows {
-        let (alias, gene) = row?;
-        results.insert(alias, gene);
+        let (alias, gene_record) = row?;
+        results.insert(alias, gene_record);
     }
 
     return Ok(results);

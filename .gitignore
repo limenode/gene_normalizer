@@ -9,3 +9,6 @@
 
 # database files
 *.db
+
+# test files
+test*.txt

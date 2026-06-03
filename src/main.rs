@@ -1,5 +1,9 @@
+use std::path::Path;
+
 use clap::Parser;
-use gene_normalizer::cache::{load_cache, lookup, lookup_many, stream_gene_tsv_lines};
+use gene_normalizer::cache::{
+    load_cache, lookup, lookup_many_chunked, print_tsv_info, stream_gene_tsv_lines,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -9,7 +13,7 @@ use gene_normalizer::cache::{load_cache, lookup, lookup_many, stream_gene_tsv_li
 )]
 struct Cli {
     /// Input file containing gene symbols/IDs
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "")]
     input: String,
 }
 
@@ -17,46 +21,51 @@ fn main() {
     env_logger::init();
 
     let args = Cli::parse();
-
     log::debug!("Input file: {}", args.input);
 
-    let mut counter = 0;
-
-    // Handle caching
     let tsv_stream = stream_gene_tsv_lines();
 
-    log::debug!("Metadata lines:");
-    for line in tsv_stream.metadata {
-        log::debug!("{}", line);
-    }
-
-    log::debug!("\nHeader line:");
-    log::debug!("{}", tsv_stream.header.join("\t"));
-
-    log::debug!("\nData lines:");
-    for line in tsv_stream.rows {
-        log::debug!("{}", line);
-        counter += 1;
-        if counter >= 10 {
-            break;
-        }
-    }
+    print_tsv_info(10);
 
     let conn = load_cache("gene_cache.db").expect("Failed to load cache");
 
-    log::debug!("\nPerforming lookup for 'BRCA1'...");
-    let result = lookup(&conn, "BRCA1").expect("Failed to lookup gene");
-    log::debug!("Lookup result: {:?}", result);
+    // Non-interactive / Input file
+    if Path::new(&args.input).exists() {
+        let file_content = std::fs::read_to_string(&args.input)
+            .expect("Failed to read input file");
+        let input_data = file_content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<&str>>();
 
-    log::debug!("\nPerforming batch lookup for ['BRCA1', 'TP53', 'EGFR']...");
-    let batch_result = lookup_many(&conn, &["BRCA1", "TP53", "EGFR"]).expect("Failed to perform batch lookup");
-    log::debug!("Batch lookup result: {:?}", batch_result);
+        match lookup_many_chunked(&conn, &input_data) {
+            Ok(results) => {
+                for (alias, gene_record) in results {
+                    println!("{}", alias);
+                    for i in 0..gene_record.len() {
+                        println!("{} - {}", tsv_stream.header[i], gene_record[i]);
+                    }
+                }
+            }
+            Err(e) => eprintln!("Error during batch lookup: {}", e)
+        }
+        return;
+    }
 
-    log::debug!("\nPerforming lookup for 'this does not exist'...");
-    let result = lookup(&conn, "this does not exist").expect("Failed to lookup gene");
-    log::debug!("Lookup result: {:?}", result);
-
-    log::debug!("\nPerforming batch lookup for ['BRCA1', 'this does not exist']...");
-    let batch_result = lookup_many(&conn, &["BRCA1", "this does not exist"]).expect("Failed to perform batch lookup");
-    log::debug!("Batch lookup result: {:?}", batch_result);
+    loop {
+        println!("\nEnter a gene symbol/ID to lookup (or 'exit' to quit):");
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .expect("Failed to read input");
+        let input = input.trim();
+        if input.eq_ignore_ascii_case("exit") {
+            break;
+        }
+        match lookup(&conn, input) {
+            Ok(result) => println!("Lookup result for '{}': {:?}", input, result),
+            Err(e) => println!("Error looking up '{}': {}", input, e),
+        }
+    }
 }
