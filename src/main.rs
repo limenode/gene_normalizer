@@ -14,49 +14,49 @@ struct Cli {
 }
 
 fn main() {
+    env_logger::init();
+
     let args = Cli::parse();
 
-    println!("Input file: {}", args.input);
+    log::debug!("Input file: {}", args.input);
 
     let mut counter = 0;
 
     // Handle caching
     let tsv_stream = stream_gene_tsv_lines();
 
-    println!("Metadata lines:");
+    log::debug!("Metadata lines:");
     for line in tsv_stream.metadata {
-        println!("{}", line);
+        log::debug!("{}", line);
     }
 
-    println!("\nHeader line:");
-    println!("{}", tsv_stream.header.join("\t"));
+    log::debug!("\nHeader line:");
+    log::debug!("{}", tsv_stream.header.join("\t"));
 
-    println!("\nData lines:");
+    log::debug!("\nData lines:");
     for line in tsv_stream.rows {
-        println!("{}", line);
+        log::debug!("{}", line);
         counter += 1;
         if counter >= 10 {
             break;
         }
     }
 
-    println!("\nLoading cache...");
     let conn = load_cache("gene_cache.db").expect("Failed to load cache");
-    println!("Cache loaded successfully.");
 
-    println!("\nPerforming lookup for 'BRCA1'...");
+    log::debug!("\nPerforming lookup for 'BRCA1'...");
     let result = lookup(&conn, "BRCA1").expect("Failed to lookup gene");
-    println!("Lookup result: {:?}", result);
+    log::debug!("Lookup result: {:?}", result);
 
-    println!("\nPerforming batch lookup for ['BRCA1', 'TP53', 'EGFR']...");
+    log::debug!("\nPerforming batch lookup for ['BRCA1', 'TP53', 'EGFR']...");
     let batch_result = lookup_many(&conn, &["BRCA1", "TP53", "EGFR"]).expect("Failed to perform batch lookup");
-    println!("Batch lookup result: {:?}", batch_result);
+    log::debug!("Batch lookup result: {:?}", batch_result);
 
-    println!("\nPerforming lookup for 'this does not exist'...");
+    log::debug!("\nPerforming lookup for 'this does not exist'...");
     let result = lookup(&conn, "this does not exist").expect("Failed to lookup gene");
-    println!("Lookup result: {:?}", result);
+    log::debug!("Lookup result: {:?}", result);
 
-    println!("\nPerforming batch lookup for ['BRCA1', 'this does not exist']...");
+    log::debug!("\nPerforming batch lookup for ['BRCA1', 'this does not exist']...");
     let batch_result = lookup_many(&conn, &["BRCA1", "this does not exist"]).expect("Failed to perform batch lookup");
-    println!("Batch lookup result: {:?}", batch_result);
+    log::debug!("Batch lookup result: {:?}", batch_result);
 }

@@ -128,6 +128,7 @@ pub fn build_cache(db_path: &str) -> anyhow::Result<()> {
 }
 
 pub fn load_cache(db_path: &str) -> anyhow::Result<Connection> {
+
     if !Path::new(db_path).exists() {
         let tmp_path = format!("{}.tmp", db_path);
         let _ = fs::remove_file(&tmp_path);
