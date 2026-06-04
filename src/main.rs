@@ -1,9 +1,7 @@
 use std::path::Path;
 
 use clap::Parser;
-use gene_normalizer::cache::{
-    load_cache, lookup, lookup_many_chunked, print_tsv_info, stream_gene_tsv_lines,
-};
+use gene_normalizer::cache::{load_cache, lookup};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -15,6 +13,22 @@ struct Cli {
     /// Input file containing gene symbols/IDs
     #[arg(short, long, default_value = "")]
     input: String,
+
+    /// Restrict lookups to one species, given as a taxon id
+    /// (e.g. "NCBITaxon:9606") or species name (e.g. "Homo sapiens")
+    #[arg(short, long)]
+    species: Option<String>,
+
+    /// Match aliases case-insensitively (e.g. "tp53" finds "TP53")
+    #[arg(long)]
+    ignore_case: bool,
+}
+
+/// Print a record as `column - value` pairs, one per line.
+fn print_record(record: &gene_normalizer::types::GeneRecord) {
+    for (col, val) in record.iter() {
+        println!("{} - {}", col, val);
+    }
 }
 
 fn main() {
@@ -23,32 +37,36 @@ fn main() {
     let args = Cli::parse();
     log::debug!("Input file: {}", args.input);
 
-    let tsv_stream = stream_gene_tsv_lines();
-
-    print_tsv_info(10);
-
     let conn = load_cache("gene_cache.db").expect("Failed to load cache");
+    let species = args.species.as_deref();
+    let ignore_case = args.ignore_case;
 
     // Non-interactive / Input file
     if Path::new(&args.input).exists() {
-        let file_content = std::fs::read_to_string(&args.input)
-            .expect("Failed to read input file");
+        let file_content = std::fs::read_to_string(&args.input).expect("Failed to read input file");
         let input_data = file_content
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
             .collect::<Vec<&str>>();
 
-        match lookup_many_chunked(&conn, &input_data) {
+        match lookup(&conn, &input_data, species, ignore_case) {
             Ok(results) => {
-                for (alias, gene_record) in results {
+                for (alias, records) in results {
                     println!("{}", alias);
-                    for i in 0..gene_record.len() {
-                        println!("{} - {}", tsv_stream.header[i], gene_record[i]);
+                    if records.is_empty() {
+                        println!("  (no match)");
+                    }
+                    for record in &records {
+                        print_record(record);
+                        // Separate multiple cross-species matches for the same alias.
+                        if records.len() > 1 {
+                            println!();
+                        }
                     }
                 }
             }
-            Err(e) => eprintln!("Error during batch lookup: {}", e)
+            Err(e) => eprintln!("Error during batch lookup: {}", e),
         }
         return;
     }
@@ -63,8 +81,23 @@ fn main() {
         if input.eq_ignore_ascii_case("exit") {
             break;
         }
-        match lookup(&conn, input) {
-            Ok(result) => println!("Lookup result for '{}': {:?}", input, result),
+        match lookup(&conn, &[input], species, ignore_case) {
+            Ok(results) => {
+                let records = results
+                    .into_iter()
+                    .next()
+                    .map(|(_, r)| r)
+                    .unwrap_or_default();
+                if records.is_empty() {
+                    println!("No match for '{}'", input);
+                }
+                for record in &records {
+                    print_record(record);
+                    if records.len() > 1 {
+                        println!();
+                    }
+                }
+            }
             Err(e) => println!("Error looking up '{}': {}", input, e),
         }
     }

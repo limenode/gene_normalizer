@@ -1,10 +1,10 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use gene_normalizer::cache::{load_cache, lookup, lookup_many};
+use gene_normalizer::cache::{load_cache, lookup};
 use std::hint::black_box;
 use std::time::Duration;
 
 fn load_aliases(conn: &rusqlite::Connection) -> Vec<String> {
-    let mut stmt = conn.prepare("SELECT alias FROM gene_aliases").unwrap();
+    let mut stmt = conn.prepare("SELECT DISTINCT alias FROM gene_aliases").unwrap();
     stmt.query_map([], |row| row.get(0))
         .unwrap()
         .map(|r| r.unwrap())
@@ -29,7 +29,7 @@ fn bench_lookup(c: &mut Criterion) {
     let mut cycle = aliases.iter().cycle();
 
     c.bench_function("lookup", |b| {
-        b.iter(|| black_box(lookup(&conn, cycle.next().unwrap())))
+        b.iter(|| black_box(lookup(&conn, &[cycle.next().unwrap().as_str()], None, false)))
     });
 }
 
@@ -48,7 +48,7 @@ fn bench_lookup_many(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new(format!("{batch_size}"), format!("{:.0}pct", hit_rate * 100.0)),
                 &batch,
-                |b, batch| b.iter(|| black_box(lookup_many(&conn, batch))),
+                |b, batch| b.iter(|| black_box(lookup(&conn, batch, None, false))),
             );
         }
     }

@@ -1,12 +1,13 @@
 use flate2::read::GzDecoder;
 use reqwest::blocking::get;
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::collections::HashMap;
+use std::sync::Arc;
 
-use crate::types::TsvStream;
+use crate::types::{GeneRecord, TsvStream};
 
 const ALLIANCE_GENOME_GENE_TSV_URL: &str =
     "https://download.alliancegenome.org/9.0.0/downloads/GENE_TSV_COMBINED.tsv.gz";
@@ -41,28 +42,6 @@ pub fn stream_gene_tsv_lines() -> TsvStream {
     }
 }
 
-pub fn print_tsv_info(n_data_lines: usize) {
-    let tsv_stream = stream_gene_tsv_lines();
-
-    log::debug!("Metadata lines:");
-    for line in tsv_stream.metadata {
-        log::debug!("{}", line);
-    }
-
-    log::debug!("\nHeader line:");
-    log::debug!("{}", tsv_stream.header.join("\t"));
-
-    let mut counter = 0;
-    log::debug!("\nData lines: (Showing first {} lines)", n_data_lines);
-    for line in tsv_stream.rows {
-        log::debug!("{}", line);
-        counter += 1;
-        if counter >= n_data_lines {
-            break;
-        }
-    }
-}
-
 pub fn build_cache(db_path: &str) -> anyhow::Result<()> {
     let tsv = stream_gene_tsv_lines();
 
@@ -83,6 +62,8 @@ pub fn build_cache(db_path: &str) -> anyhow::Result<()> {
     let id_idx = col("GeneId")?;
     let symbol_idx = col("GeneSymbol")?;
     let secondary_idx = col("GeneSecondaryIds")?;
+    let taxon_idx = col("Taxon")?;
+    let species_name_idx = col("SpeciesName")?;
 
     let mut conn = Connection::open(db_path)?;
 
@@ -93,10 +74,19 @@ pub fn build_cache(db_path: &str) -> anyhow::Result<()> {
             primary key ("GeneId")
         ) WITHOUT ROWID;
 
-
+        -- (alias, taxon) is the key so the same symbol/secondary id can resolve to a
+        -- different gene per species. `alias` leads the PK so alias-only lookups still
+        -- use the index (prefix scan); `alias = ? AND taxon = ?` is a point lookup.
         CREATE TABLE IF NOT EXISTS gene_aliases (
-            alias TEXT PRIMARY KEY,
-            gene_id TEXT NOT NULL
+            alias TEXT NOT NULL,
+            taxon TEXT NOT NULL,
+            gene_id TEXT NOT NULL,
+            PRIMARY KEY (alias, taxon)
+        ) WITHOUT ROWID;
+
+        CREATE TABLE IF NOT EXISTS species (
+            taxon TEXT PRIMARY KEY,
+            species_name TEXT NOT NULL
         ) WITHOUT ROWID;
         "#
     ))?;
@@ -119,19 +109,27 @@ pub fn build_cache(db_path: &str) -> anyhow::Result<()> {
             "INSERT OR IGNORE INTO genes ({quoted_cols}) VALUES ({placeholders})"
         ))?;
 
-        let mut alias_stmt =
-            tx.prepare("INSERT OR IGNORE INTO gene_aliases (alias, gene_id) VALUES (?1, ?2)")?;
+        let mut alias_stmt = tx.prepare(
+            "INSERT OR IGNORE INTO gene_aliases (alias, taxon, gene_id) VALUES (?1, ?2, ?3)",
+        )?;
+
+        let mut species_stmt =
+            tx.prepare("INSERT OR IGNORE INTO species (taxon, species_name) VALUES (?1, ?2)")?;
 
         for line in tsv.rows {
             let fields: Vec<&str> = line.split('\t').collect();
             let gene_id = fields[id_idx];
             let symbol = fields[symbol_idx];
             let secondary_ids = fields[secondary_idx];
+            let taxon = fields[taxon_idx];
+            let species_name = fields[species_name_idx];
 
             gene_stmt.execute(rusqlite::params_from_iter(fields.iter()))?;
 
-            alias_stmt.execute(params![symbol, gene_id])?; // symbol -> gene_id
-            alias_stmt.execute(params![gene_id, gene_id])?; // gene_id -> gene_id
+            species_stmt.execute(params![taxon, species_name])?;
+
+            alias_stmt.execute(params![symbol, taxon, gene_id])?; // symbol -> gene_id
+            alias_stmt.execute(params![gene_id, taxon, gene_id])?; // gene_id -> gene_id
 
             // secondaries -> gene_id
             if !secondary_ids.is_empty() && secondary_ids != "None" {
@@ -140,17 +138,30 @@ pub fn build_cache(db_path: &str) -> anyhow::Result<()> {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                 {
-                    alias_stmt.execute(params![sec_id, gene_id])?;
+                    alias_stmt.execute(params![sec_id, taxon, gene_id])?;
                 }
             }
         }
     }
     tx.commit()?;
+
+    // Built after the bulk insert (cheaper than maintaining it per-row). Powers
+    // case-insensitive (`COLLATE NOCASE`) alias lookups; the case-sensitive PK still
+    // keeps case-distinct aliases (e.g. mouse `Gs` vs `gs`) as separate rows.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_gene_aliases_nocase
+             ON gene_aliases (alias COLLATE NOCASE, taxon);",
+    )?;
+
     Ok(())
 }
 
+/// Load the cache from the given path, building it if it doesn't exist.
+///
+/// The cache is a SQLite database built from the Alliance Genome GENE_TSV_COMBINED.tsv.gz
+/// file, structured to support efficient lookups of gene records by symbol or ID,
+/// optionally filtered by species.
 pub fn load_cache(db_path: &str) -> anyhow::Result<Connection> {
-
     if !Path::new(db_path).exists() {
         let tmp_path = format!("{}.tmp", db_path);
         let _ = fs::remove_file(&tmp_path);
@@ -161,69 +172,137 @@ pub fn load_cache(db_path: &str) -> anyhow::Result<Connection> {
     Ok(Connection::open(db_path)?)
 }
 
-pub fn lookup(conn: &Connection, alias: &str) -> rusqlite::Result<Option<Vec<String>>> {
+/// Resolve a species filter (either a taxon id like `NCBITaxon:9606` or a species
+/// name like `Homo sapiens`) to its canonical taxon id. Errors if it matches neither.
+pub fn resolve_taxon(conn: &Connection, species: &str) -> anyhow::Result<String> {
     conn.query_row(
-        r#"
-            SELECT g.* FROM genes g
-            JOIN gene_aliases a ON g.GeneId = a.gene_id
-            WHERE a.alias = ?1
-            "#,
-        params![alias],
-        |row| {
-            let count = row.as_ref().column_count();
-            (0..count).map(|i| row.get(i)).collect()
-        },
+        "SELECT taxon FROM species WHERE taxon = ?1 OR species_name = ?1 LIMIT 1",
+        params![species],
+        |row| row.get(0),
     )
-    .optional()
+    .optional()?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "Unknown species (not a known taxon or species name): {}",
+            species
+        )
+    })
 }
 
-pub fn lookup_many(
+/// Look up any number of aliases, optionally restricted to a single species (given as a
+/// taxon id or a species name).
+///
+/// Results echo the input order. Each alias maps to a `Vec<GeneRecord>`: empty for a
+/// miss, one entry for a unique hit, and more than one when the alias is ambiguous —
+/// across species (only possible when `species` is `None`), and/or across case-variants
+/// when `ignore_case` is set (e.g. `gs` matching both `Gs` and `gs`).
+///
+/// With `ignore_case`, matching is ASCII-case-insensitive (`COLLATE NOCASE`).
+///
+/// The species is resolved to a taxon exactly once here, then the aliases are queried in
+/// chunks (see `lookup_chunk`) to stay under SQLite's bound-parameter limit.
+pub fn lookup(
     conn: &Connection,
     aliases: &[&str],
-) -> rusqlite::Result<HashMap<String, Vec<String>>> {
+    species: Option<&str>,
+    ignore_case: bool,
+) -> anyhow::Result<Vec<(String, Vec<GeneRecord>)>> {
     if aliases.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(Vec::new());
     }
-    
+
+    let taxon: Option<String> = match species {
+        Some(s) => Some(resolve_taxon(conn, s)?),
+        None => None,
+    };
+
+    aliases
+        .chunks(999)
+        .map(|chunk| lookup_chunk(conn, chunk, taxon.as_deref(), ignore_case))
+        .try_fold(Vec::new(), |mut acc, chunk_result| {
+            acc.extend(chunk_result?);
+            Ok::<_, anyhow::Error>(acc)
+        })
+}
+
+fn lookup_chunk(
+    conn: &Connection,
+    aliases: &[&str],
+    taxon: Option<&str>,
+    ignore_case: bool,
+) -> rusqlite::Result<Vec<(String, Vec<GeneRecord>)>> {
     let placeholders = (1..=aliases.len())
         .map(|i| format!("?{i}"))
         .collect::<Vec<String>>()
         .join(", ");
 
-    let sql = format!(
-        r#"
-        SELECT a.alias, g.* FROM genes g
-        JOIN gene_aliases a ON g.GeneId = a.gene_id
-        WHERE a.alias IN ({placeholders})
-        "#
+    // Forcing NOCASE on the alias lets the dedicated `idx_gene_aliases_nocase` index
+    // serve the match; an exact lookup uses the case-sensitive PK as before.
+    let alias_expr = if ignore_case {
+        "a.alias COLLATE NOCASE"
+    } else {
+        "a.alias"
+    };
+
+    let mut sql = format!(
+        "SELECT a.alias, g.* FROM genes g \
+         JOIN gene_aliases a ON g.GeneId = a.gene_id \
+         WHERE {alias_expr} IN ({placeholders})"
     );
+    if taxon.is_some() {
+        // Filter on the alias index's trailing column — a point lookup, not a post-join scan.
+        sql.push_str(&format!(" AND a.taxon = ?{}", aliases.len() + 1));
+    }
 
     let mut stmt = conn.prepare(&sql)?;
-    let mut results = HashMap::new();
 
-    let rows = stmt.query_map(rusqlite::params_from_iter(aliases.iter()), |row| {
+    let columns: Arc<[String]> = stmt
+        .column_names()
+        .into_iter()
+        .skip(1)
+        .map(String::from)
+        .collect();
+
+    // Bind the aliases, then the taxon filter (if any).
+    let mut binds: Vec<&str> = aliases.to_vec();
+    if let Some(t) = taxon {
+        binds.push(t);
+    }
+
+    // Group results by the same key the SQL matched on: the exact alias, or its
+    // ASCII-lowercased form to mirror SQLite's NOCASE folding. This is what reunites the
+    // input alias with hits that differ in case (the DB returns the *stored* casing).
+    let key = |s: &str| {
+        if ignore_case {
+            s.to_ascii_lowercase()
+        } else {
+            s.to_string()
+        }
+    };
+
+    let mut found: HashMap<String, Vec<GeneRecord>> = HashMap::new();
+    let rows = stmt.query_map(rusqlite::params_from_iter(binds.iter()), |row| {
         let alias: String = row.get(0)?;
         let count = row.as_ref().column_count();
-        let gene_record: rusqlite::Result<Vec<String>> = (1..count).map(|i| row.get(i)).collect();
-        Ok((alias, gene_record?))
+        let values: rusqlite::Result<Vec<String>> = (1..count).map(|i| row.get(i)).collect();
+        Ok((alias, values?))
     })?;
 
     for row in rows {
-        let (alias, gene_record) = row?;
-        results.insert(alias, gene_record);
+        let (alias, values) = row?;
+        found.entry(key(&alias)).or_default().push(GeneRecord {
+            columns: columns.clone(),
+            values,
+        });
     }
 
-    return Ok(results);
-}
-
-pub fn lookup_many_chunked(
-    conn: &Connection,
-    aliases: &[&str],
-) -> rusqlite::Result<HashMap<String, Vec<String>>> {
-    aliases.chunks(999)
-        .map(|chunk| lookup_many(conn, chunk))
-        .try_fold(HashMap::new(), |mut acc, chunk_result| {
-            acc.extend(chunk_result?);
-            Ok(acc)
+    Ok(aliases
+        .iter()
+        .map(|&alias| {
+            (
+                alias.to_string(),
+                found.get(&key(alias)).cloned().unwrap_or_default(),
+            )
         })
+        .collect())
 }
