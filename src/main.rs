@@ -2,7 +2,7 @@ use std::io::{BufRead, IsTerminal, Read, Write};
 
 use anyhow::{Context, bail};
 use clap::{Parser, ValueEnum};
-use gene_normalizer::cache::{gene_columns, load_cache, lookup};
+use gene_normalizer::cache::{cache_db_path, gene_columns, load_cache, lookup};
 use gene_normalizer::types::GeneRecord;
 
 #[derive(Parser, Debug)]
@@ -93,12 +93,14 @@ fn run() -> anyhow::Result<()> {
 
     let args = Cli::parse();
 
+    let db_path = cache_db_path()?;
+
     let rebuild_cache = args.rebuild_cache;
     if rebuild_cache {
-        std::fs::remove_file("gene_cache.db").ok();
+        std::fs::remove_file(&db_path).ok();
     }
 
-    let conn = load_cache("gene_cache.db").context("Failed to load cache")?;
+    let conn = load_cache(&db_path).context("Failed to load cache")?;
     let species = args.species.as_deref();
     let ignore_case = args.ignore_case;
 

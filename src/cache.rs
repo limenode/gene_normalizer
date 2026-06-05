@@ -4,10 +4,24 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use directories::ProjectDirs;
+
 use crate::types::{GeneRecord, TsvStream};
+
+/// Canonical on-disk location for the gene cache DB, following each platform's
+/// conventions. Creates the parent directory if it doesn't yet exist.
+pub fn cache_db_path() -> anyhow::Result<PathBuf> {
+    let dirs = ProjectDirs::from("org", "AllianceGenome", "gene_normalizer").ok_or_else(|| {
+        anyhow::anyhow!("could not determine a cache directory for this platform")
+    })?;
+    let dir = dirs.cache_dir();
+    fs::create_dir_all(dir)
+        .map_err(|e| anyhow::anyhow!("failed to create cache directory {}: {e}", dir.display()))?;
+    Ok(dir.join("gene_cache.db"))
+}
 
 const ALLIANCE_GENOME_GENE_TSV_URL: &str =
     "https://download.alliancegenome.org/9.0.0/downloads/GENE_TSV_COMBINED.tsv.gz";
@@ -42,7 +56,7 @@ pub fn stream_gene_tsv_lines() -> TsvStream {
     }
 }
 
-pub fn build_cache(db_path: &str) -> anyhow::Result<()> {
+pub fn build_cache(db_path: &Path) -> anyhow::Result<()> {
     let tsv = stream_gene_tsv_lines();
 
     let col = |name: &str| -> anyhow::Result<usize> {
@@ -161,11 +175,17 @@ pub fn build_cache(db_path: &str) -> anyhow::Result<()> {
 /// The cache is a SQLite database built from the Alliance Genome GENE_TSV_COMBINED.tsv.gz
 /// file, structured to support efficient lookups of gene records by symbol or ID,
 /// optionally filtered by species.
-pub fn load_cache(db_path: &str) -> anyhow::Result<Connection> {
-    if !Path::new(db_path).exists() {
-        let tmp_path = format!("{}.tmp", db_path);
+pub fn load_cache(db_path: &Path) -> anyhow::Result<Connection> {
+    if !db_path.exists() {
+        let mut tmp_os = db_path.as_os_str().to_owned();
+        tmp_os.push(".tmp");
+        let tmp_path = PathBuf::from(tmp_os);
+        let mut journal_os = tmp_path.as_os_str().to_owned();
+        journal_os.push("-journal");
+
         let _ = fs::remove_file(&tmp_path);
-        let _ = fs::remove_file(format!("{}-journal", tmp_path));
+        let _ = fs::remove_file(PathBuf::from(journal_os));
+
         eprint!("Building cache...");
         build_cache(&tmp_path)?;
         fs::rename(&tmp_path, db_path)?;
@@ -245,8 +265,6 @@ fn lookup_chunk(
         .collect::<Vec<String>>()
         .join(", ");
 
-    // Forcing NOCASE on the alias lets the dedicated `idx_gene_aliases_nocase` index
-    // serve the match; an exact lookup uses the case-sensitive PK as before.
     let alias_expr = if ignore_case {
         "a.alias COLLATE NOCASE"
     } else {
@@ -279,8 +297,7 @@ fn lookup_chunk(
     }
 
     // Group results by the same key the SQL matched on: the exact alias, or its
-    // ASCII-lowercased form to mirror SQLite's NOCASE folding. This is what reunites the
-    // input alias with hits that differ in case (the DB returns the *stored* casing).
+    // ASCII-lowercased form to mirror SQLite's NOCASE folding.
     let key = |s: &str| {
         if ignore_case {
             s.to_ascii_lowercase()

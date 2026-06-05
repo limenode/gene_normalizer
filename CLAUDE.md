@@ -88,8 +88,9 @@ holds the shared data types (`TsvStream`, `GeneRecord`).
 - **`load_cache(db_path)`** is the entry point: if the DB file is absent it builds into
   a `.tmp` file and atomically renames into place (so a partial/interrupted build never
   leaves a usable-looking DB). If the file exists it's opened as-is — **there is no
-  staleness check or rebuild**; delete `gene_cache.db` to force a refresh. A DB built by
-  an older schema version will NOT be migrated — delete and rebuild after schema changes.
+  staleness check or rebuild**; delete the cache DB (see `cache_db_path()`) or use
+  `--rebuild-cache` to force a refresh. A DB built by an older schema version will NOT be
+  migrated — delete and rebuild after schema changes.
 
 - **Lookups** join `gene_aliases` to `genes` on `gene_id`, filtering by `alias` (and
   `taxon` when a species is given). Column names come from `stmt.column_names()` — the
@@ -119,8 +120,12 @@ holds the shared data types (`TsvStream`, `GeneRecord`).
 
 - `gene_cache.db` is ~500 MB and is gitignored (`*.db`). It is rebuilt on first run if
   missing, which requires network access to download.alliancegenome.org.
-- The cache path is hardcoded to `"gene_cache.db"` (relative to CWD) in `main.rs` and
-  `benches/lookup.rs`.
+- The cache path is resolved by `cache_db_path()` (in `cache.rs`) to the platform's
+  per-application cache directory via the `directories` crate — e.g.
+  `~/.cache/gene_normalizer/gene_cache.db` on Linux (respecting `$XDG_CACHE_HOME`),
+  `~/Library/Caches/org.AllianceGenome.gene_normalizer/` on macOS, `%LOCALAPPDATA%` on
+  Windows. The parent dir is created if missing. Both `main.rs` and `benches/lookup.rs`
+  call this helper rather than hardcoding a path.
 - Dev-only diagnostics live in `examples/` (e.g. `inspect_tsv`), not in the library, so
   they never ship in the production binary.
 - Edition 2024 — uses recent Rust; ensure a current toolchain.

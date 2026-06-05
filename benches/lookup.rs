@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use gene_normalizer::cache::{load_cache, lookup};
+use gene_normalizer::cache::{cache_db_path, load_cache, lookup};
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -24,7 +24,7 @@ fn make_batch(real_aliases: &[String], batch_size: usize, hit_rate: f64) -> Vec<
 }
 
 fn bench_lookup(c: &mut Criterion) {
-    let conn = load_cache("gene_cache.db").unwrap();
+    let conn = load_cache(&cache_db_path().unwrap()).unwrap();
     let aliases = load_aliases(&conn);
     let mut cycle = aliases.iter().cycle();
 
@@ -34,7 +34,7 @@ fn bench_lookup(c: &mut Criterion) {
 }
 
 fn bench_lookup_many(c: &mut Criterion) {
-    let conn = load_cache("gene_cache.db").unwrap();
+    let conn = load_cache(&cache_db_path().unwrap()).unwrap();
     let aliases = load_aliases(&conn);
 
     let mut group = c.benchmark_group("lookup_many");
