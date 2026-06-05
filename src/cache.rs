@@ -166,8 +166,10 @@ pub fn load_cache(db_path: &str) -> anyhow::Result<Connection> {
         let tmp_path = format!("{}.tmp", db_path);
         let _ = fs::remove_file(&tmp_path);
         let _ = fs::remove_file(format!("{}-journal", tmp_path));
+        eprint!("Building cache...");
         build_cache(&tmp_path)?;
         fs::rename(&tmp_path, db_path)?;
+        eprintln!(" done.");
     }
     Ok(Connection::open(db_path)?)
 }

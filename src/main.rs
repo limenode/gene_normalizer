@@ -52,6 +52,10 @@ struct Cli {
     /// Print a header row before tsv output.
     #[arg(long)]
     header: bool,
+
+    /// Rebuild the cache from the latest Alliance of Genome Resources (AGR) data source
+    #[arg(long)]
+    rebuild_cache: bool,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +93,11 @@ fn run() -> anyhow::Result<()> {
 
     let args = Cli::parse();
 
+    let rebuild_cache = args.rebuild_cache;
+    if rebuild_cache {
+        std::fs::remove_file("gene_cache.db").ok();
+    }
+
     let conn = load_cache("gene_cache.db").context("Failed to load cache")?;
     let species = args.species.as_deref();
     let ignore_case = args.ignore_case;
@@ -104,8 +113,7 @@ fn run() -> anyhow::Result<()> {
     });
 
     // Resolve which gene columns the tsv format should emit, then validate them
-    // against the actual cached schema so a typo fails loudly instead of silently
-    // producing blank columns.
+    // against the actual cached schema
     let fields: Vec<String> = if args.id_only {
         vec!["GeneId".to_string()]
     } else if args.symbol_only {
@@ -124,7 +132,11 @@ fn run() -> anyhow::Result<()> {
         let valid = gene_columns(&conn)?;
         for f in &fields {
             if !valid.contains(f) {
-                bail!("Unknown field '{}'. Available columns: {}", f, valid.join(", "));
+                bail!(
+                    "Unknown field '{}'. Available columns: {}",
+                    f,
+                    valid.join(", ")
+                );
             }
         }
     }
