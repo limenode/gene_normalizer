@@ -128,8 +128,10 @@ cat genes.txt | ./gene_normalizer --fields GeneId,GeneSymbol,SpeciesName --heade
 
 > **Tip — ambiguous matches:** if an alias maps to more than one gene (for example, the
 > same symbol in several species, or case variants under `--ignore-case`), all matches are
-> printed and a warning is written to standard error. Add `--species` to get a single,
-> unambiguous result per input.
+> printed and a warning is written to standard error. Adding `--species` removes ambiguity
+> that comes from a symbol being shared across organisms. Note that it does not collapse
+> case-insensitive matches within a single species (e.g. mouse `Gs` and `gs`), so a lookup can
+> still return several genes when `--ignore-case` is on.
 
 ## Output columns
 
