@@ -14,11 +14,16 @@ symbol/secondary ID can refer to different genes in different species.
 
 ```bash
 cargo build --release                          # build
-cargo run                                      # interactive REPL (reads aliases from stdin)
+cargo run                                      # interactive REPL (a TTY on stdin → prompt)
+cat genes.txt | cargo run                      # piped stdin → batch mode automatically
 cargo run -- --input genes.txt                 # batch lookup, one alias per line
+cargo run -- --input -                         # "-" forces reading aliases from stdin
 cargo run -- --input genes.txt --species "Homo sapiens"   # scope to a species (name or taxon)
 cargo run -- --species NCBITaxon:9606          # REPL scoped to a species
 cargo run -- --input genes.txt --ignore-case   # case-insensitive matching (tp53 finds TP53)
+cat genes.txt | cargo run -- --id-only         # tsv: just the canonical GeneId per input
+cat genes.txt | cargo run -- --fields GeneId,GeneSymbol --header   # pick columns + header row
+cargo run -- -o pretty < genes.txt             # force human-readable output even when piped
 cargo run --example inspect_tsv                # dev-only: dump the source TSV's header + first rows
 cargo test                                     # run tests
 cargo bench                                    # run criterion benchmarks (bench: lookup)
@@ -27,6 +32,30 @@ RUST_LOG=debug cargo run                       # enable logging (env_logger; int
 
 The `--species` flag accepts either a taxon id (`NCBITaxon:9606`) or a species name
 (`Homo sapiens`); see `resolve_taxon`. Internal logging is off unless `RUST_LOG` is set.
+
+### Interactive vs. pipeline behavior (`main.rs`)
+
+`main.rs` adapts to how it's invoked, using `std::io::IsTerminal`:
+
+- **Input source** is decided by stdin: an explicit `--input FILE` wins; `--input -` or a
+  *piped* stdin (`stdin().is_terminal() == false`) triggers batch mode; otherwise (a TTY
+  on stdin, no file) the interactive REPL runs. The REPL prompt is written to **stderr**
+  and exits cleanly on EOF (Ctrl-D) or `exit`.
+- **Output format** defaults from stdout: `pretty` (the `column - value` blocks) when
+  stdout is a TTY, `tsv` when piped/redirected. `-o/--format {pretty,tsv}` overrides.
+- **tsv format** emits one tab-separated line per match: a leading `input` column echoing
+  the alias (suppress with `--no-echo`) plus the columns named by `--fields`
+  (default `GeneId,GeneSymbol`; `--id-only`/`--symbol-only` are shorthands). Field names
+  are validated against the live `genes` schema via `gene_columns()` — an unknown field is
+  a hard error listing the valid columns. `--header` prints a header row. **Misses still
+  emit a row** (echoed alias + blank fields) so output stays line-aligned with input, which
+  matters when results are pasted back into a pipeline. `pretty` always shows the full
+  record and ignores `--fields`.
+- **Ambiguity** (an alias matching multiple genes across species, or case-variants under
+  `--ignore-case`) emits *every* match and logs one `warning:` per ambiguous alias to
+  **stderr**, so scripts can detect it; scope with `--species` for 1:1 output.
+- **Broken pipe** (e.g. `… | head`) exits 0 silently instead of erroring, like standard
+  Unix filters; all other errors go to stderr with exit 1.
 
 ## Architecture
 

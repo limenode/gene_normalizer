@@ -172,6 +172,13 @@ pub fn load_cache(db_path: &str) -> anyhow::Result<Connection> {
     Ok(Connection::open(db_path)?)
 }
 
+/// The column names of the `genes` table, in order — i.e. the cached TSV header.
+/// Used to validate user-requested output fields against the actual schema.
+pub fn gene_columns(conn: &Connection) -> anyhow::Result<Vec<String>> {
+    let stmt = conn.prepare("SELECT * FROM genes LIMIT 0")?;
+    Ok(stmt.column_names().into_iter().map(String::from).collect())
+}
+
 /// Resolve a species filter (either a taxon id like `NCBITaxon:9606` or a species
 /// name like `Homo sapiens`) to its canonical taxon id. Errors if it matches neither.
 pub fn resolve_taxon(conn: &Connection, species: &str) -> anyhow::Result<String> {
