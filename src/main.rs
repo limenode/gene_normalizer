@@ -70,6 +70,7 @@ enum Format {
 struct OutputCfg {
     format: Format,
     fields: Vec<String>,
+    fields_explicit: bool,
     echo: bool,
     header: bool,
 }
@@ -104,8 +105,6 @@ fn run() -> anyhow::Result<()> {
     let species = args.species.as_deref();
     let ignore_case = args.ignore_case;
 
-    // stdout TTY decides the *default* output format; stdin TTY decides whether
-    // we prompt interactively or read a piped batch.
     let format = args.format.unwrap_or_else(|| {
         if std::io::stdout().is_terminal() {
             Format::Pretty
@@ -114,8 +113,7 @@ fn run() -> anyhow::Result<()> {
         }
     });
 
-    // Resolve which gene columns the tsv format should emit, then validate them
-    // against the actual cached schema
+    let fields_explicit = args.id_only || args.symbol_only || args.fields.is_some();
     let fields: Vec<String> = if args.id_only {
         vec!["GeneId".to_string()]
     } else if args.symbol_only {
@@ -130,22 +128,21 @@ fn run() -> anyhow::Result<()> {
         vec!["GeneId".to_string(), "GeneSymbol".to_string()]
     };
 
-    if format == Format::Tsv {
-        let valid = gene_columns(&conn)?;
-        for f in &fields {
-            if !valid.contains(f) {
-                bail!(
-                    "Unknown field '{}'. Available columns: {}",
-                    f,
-                    valid.join(", ")
-                );
-            }
+    let valid = gene_columns(&conn)?;
+    for f in &fields {
+        if !valid.contains(f) {
+            bail!(
+                "Unknown field '{}'. Available columns: {}",
+                f,
+                valid.join(", ")
+            );
         }
     }
 
     let cfg = OutputCfg {
         format,
         fields,
+        fields_explicit,
         echo: !args.no_echo,
         header: args.header,
     };
@@ -270,20 +267,35 @@ fn emit(
     cfg: &OutputCfg,
 ) -> anyhow::Result<()> {
     match cfg.format {
-        Format::Pretty => emit_pretty(out, alias, records),
+        Format::Pretty => emit_pretty(out, alias, records, cfg),
         Format::Tsv => emit_tsv(out, alias, records, cfg),
     }
 }
 
-fn emit_pretty(out: &mut impl Write, alias: &str, records: &[GeneRecord]) -> anyhow::Result<()> {
+fn emit_pretty(
+    out: &mut impl Write,
+    alias: &str,
+    records: &[GeneRecord],
+    cfg: &OutputCfg,
+) -> anyhow::Result<()> {
     if records.is_empty() {
         writeln!(out, "{}: (no match)", alias)?;
         return Ok(());
     }
     for record in records {
         writeln!(out, "{}", alias)?;
-        for (col, val) in record.iter() {
-            writeln!(out, "  {} - {}", col, val)?;
+        if cfg.fields_explicit {
+            // User asked for specific columns: emit in requested order.
+            for field in &cfg.fields {
+                if let Some(val) = record.get(field) {
+                    writeln!(out, "  {} - {}", field, val)?;
+                }
+            }
+        } else {
+            // Default: emit the full record.
+            for (col, val) in record.iter() {
+                writeln!(out, "  {} - {}", col, val)?;
+            }
         }
         // Blank line between multiple cross-species/case matches for one alias.
         if records.len() > 1 {
