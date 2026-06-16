@@ -2,7 +2,8 @@ use std::io::{BufRead, IsTerminal, Read, Write};
 
 use anyhow::{Context, bail};
 use clap::{Parser, ValueEnum};
-use gene_normalizer::cache::{cache_db_path, gene_columns, load_cache, lookup};
+use gene_normalizer::GeneNormalizer;
+use gene_normalizer::cache::cache_db_path;
 use gene_normalizer::types::GeneRecord;
 
 #[derive(Parser, Debug)]
@@ -101,7 +102,7 @@ fn run() -> anyhow::Result<()> {
         std::fs::remove_file(&db_path).ok();
     }
 
-    let conn = load_cache(&db_path).context("Failed to load cache")?;
+    let gn_cache = GeneNormalizer::open(&db_path).context("Failed to load cache")?;
     let species = args.species.as_deref();
     let ignore_case = args.ignore_case;
 
@@ -128,7 +129,7 @@ fn run() -> anyhow::Result<()> {
         vec!["GeneId".to_string(), "GeneSymbol".to_string()]
     };
 
-    let valid = gene_columns(&conn)?;
+    let valid = gn_cache.columns()?;
     for f in &fields {
         if !valid.contains(f) {
             bail!(
@@ -151,16 +152,22 @@ fn run() -> anyhow::Result<()> {
     // mean "batch-read stdin"; otherwise fall back to the interactive prompt.
     let stdin_is_tty = std::io::stdin().is_terminal();
     match args.input.as_deref() {
-        Some("-") => run_batch(&conn, read_stdin_aliases()?, species, ignore_case, &cfg),
+        Some("-") => run_batch(&gn_cache, read_stdin_aliases()?, species, ignore_case, &cfg),
         Some(path) => {
             let content = std::fs::read_to_string(path)
                 .with_context(|| format!("Failed to read input file '{}'", path))?;
-            run_batch(&conn, parse_aliases(&content), species, ignore_case, &cfg)
+            run_batch(
+                &gn_cache,
+                parse_aliases(&content),
+                species,
+                ignore_case,
+                &cfg,
+            )
         }
         None if !stdin_is_tty => {
-            run_batch(&conn, read_stdin_aliases()?, species, ignore_case, &cfg)
+            run_batch(&gn_cache, read_stdin_aliases()?, species, ignore_case, &cfg)
         }
-        None => run_repl(&conn, species, ignore_case, &cfg),
+        None => run_repl(&gn_cache, species, ignore_case, &cfg),
     }
 }
 
@@ -184,14 +191,14 @@ fn read_stdin_aliases() -> anyhow::Result<Vec<String>> {
 
 /// Run a non-interactive batch lookup and emit results to stdout.
 fn run_batch(
-    conn: &rusqlite::Connection,
+    gn: &GeneNormalizer,
     aliases: Vec<String>,
     species: Option<&str>,
     ignore_case: bool,
     cfg: &OutputCfg,
 ) -> anyhow::Result<()> {
     let refs: Vec<&str> = aliases.iter().map(String::as_str).collect();
-    let results = lookup(conn, &refs, species, ignore_case)?;
+    let results = gn.lookup(&refs, species, ignore_case)?;
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -207,7 +214,7 @@ fn run_batch(
 
 /// Interactive REPL: read one alias per line from the terminal until EOF or "exit".
 fn run_repl(
-    conn: &rusqlite::Connection,
+    gn: &GeneNormalizer,
     species: Option<&str>,
     ignore_case: bool,
     cfg: &OutputCfg,
@@ -235,7 +242,7 @@ fn run_repl(
             break;
         }
 
-        match lookup(conn, &[alias], species, ignore_case) {
+        match gn.lookup(&[alias], species, ignore_case) {
             Ok(results) => {
                 for (a, records) in &results {
                     warn_if_ambiguous(a, records);
