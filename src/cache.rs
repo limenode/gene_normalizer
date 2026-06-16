@@ -9,17 +9,19 @@ use std::sync::Arc;
 
 use directories::ProjectDirs;
 
+use crate::error::{Error, Result};
 use crate::types::{GeneRecord, TsvStream};
 
 /// Canonical on-disk location for the gene cache DB, following each platform's
 /// conventions. Creates the parent directory if it doesn't yet exist.
-pub fn cache_db_path() -> anyhow::Result<PathBuf> {
-    let dirs = ProjectDirs::from("org", "AllianceGenome", "gene_normalizer").ok_or_else(|| {
-        anyhow::anyhow!("could not determine a cache directory for this platform")
-    })?;
+pub fn cache_db_path() -> Result<PathBuf> {
+    let dirs =
+        ProjectDirs::from("org", "AllianceGenome", "gene_normalizer").ok_or(Error::NoCacheDir)?;
     let dir = dirs.cache_dir();
-    fs::create_dir_all(dir)
-        .map_err(|e| anyhow::anyhow!("failed to create cache directory {}: {e}", dir.display()))?;
+    fs::create_dir_all(dir).map_err(|source| Error::CreateCacheDir {
+        path: dir.to_path_buf(),
+        source,
+    })?;
     Ok(dir.join("gene_cache.db"))
 }
 
@@ -56,14 +58,14 @@ pub fn stream_gene_tsv_lines() -> TsvStream {
     }
 }
 
-pub fn build_cache(db_path: &Path) -> anyhow::Result<()> {
+pub fn build_cache(db_path: &Path) -> Result<()> {
     let tsv = stream_gene_tsv_lines();
 
-    let col = |name: &str| -> anyhow::Result<usize> {
+    let col = |name: &str| -> Result<usize> {
         tsv.header
             .iter()
             .position(|col_name| col_name == name)
-            .ok_or_else(|| anyhow::anyhow!("Column '{}' not found in TSV header", name))
+            .ok_or_else(|| Error::MissingColumn(name.to_string()))
     };
 
     let col_defs = tsv
@@ -175,7 +177,7 @@ pub fn build_cache(db_path: &Path) -> anyhow::Result<()> {
 /// The cache is a SQLite database built from the Alliance Genome GENE_TSV_COMBINED.tsv.gz
 /// file, structured to support efficient lookups of gene records by symbol or ID,
 /// optionally filtered by species.
-pub fn load_cache(db_path: &Path) -> anyhow::Result<Connection> {
+pub fn load_cache(db_path: &Path) -> Result<Connection> {
     if !db_path.exists() {
         let mut tmp_os = db_path.as_os_str().to_owned();
         tmp_os.push(".tmp");
@@ -196,26 +198,21 @@ pub fn load_cache(db_path: &Path) -> anyhow::Result<Connection> {
 
 /// The column names of the `genes` table, in order — i.e. the cached TSV header.
 /// Used to validate user-requested output fields against the actual schema.
-pub fn gene_columns(conn: &Connection) -> anyhow::Result<Vec<String>> {
+pub fn gene_columns(conn: &Connection) -> Result<Vec<String>> {
     let stmt = conn.prepare("SELECT * FROM genes LIMIT 0")?;
     Ok(stmt.column_names().into_iter().map(String::from).collect())
 }
 
 /// Resolve a species filter (either a taxon id like `NCBITaxon:9606` or a species
 /// name like `Homo sapiens`) to its canonical taxon id. Errors if it matches neither.
-pub fn resolve_taxon(conn: &Connection, species: &str) -> anyhow::Result<String> {
+pub fn resolve_taxon(conn: &Connection, species: &str) -> Result<String> {
     conn.query_row(
         "SELECT taxon FROM species WHERE taxon = ?1 OR species_name = ?1 LIMIT 1",
         params![species],
         |row| row.get(0),
     )
     .optional()?
-    .ok_or_else(|| {
-        anyhow::anyhow!(
-            "Unknown species (not a known taxon or species name): {}",
-            species
-        )
-    })
+    .ok_or_else(|| Error::UnknownSpecies(species.to_string()))
 }
 
 /// Look up any number of aliases, optionally restricted to a single species (given as a
@@ -235,7 +232,7 @@ pub fn lookup(
     aliases: &[&str],
     species: Option<&str>,
     ignore_case: bool,
-) -> anyhow::Result<Vec<(String, Vec<GeneRecord>)>> {
+) -> Result<Vec<(String, Vec<GeneRecord>)>> {
     if aliases.is_empty() {
         return Ok(Vec::new());
     }
@@ -250,7 +247,7 @@ pub fn lookup(
         .map(|chunk| lookup_chunk(conn, chunk, taxon.as_deref(), ignore_case))
         .try_fold(Vec::new(), |mut acc, chunk_result| {
             acc.extend(chunk_result?);
-            Ok::<_, anyhow::Error>(acc)
+            Ok::<_, Error>(acc)
         })
 }
 

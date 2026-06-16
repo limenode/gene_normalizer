@@ -568,6 +568,7 @@ dependencies = [
  "log",
  "reqwest",
  "rusqlite",
+ "thiserror",
 ]
 
 [[package]]

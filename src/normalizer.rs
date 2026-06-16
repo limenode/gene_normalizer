@@ -3,6 +3,7 @@ use std::path::Path;
 use rusqlite::Connection;
 
 use crate::cache::{self, cache_db_path, gene_columns, load_cache};
+use crate::error::Result;
 use crate::types::GeneRecord;
 
 /// An opened gene cache, ready for lookups.
@@ -18,13 +19,13 @@ pub struct GeneNormalizer {
 impl GeneNormalizer {
     /// Open the cache at the default platform cache path (see
     /// [`cache_db_path`]), building it from the Alliance Genome data if absent.
-    pub fn open_default() -> anyhow::Result<Self> {
+    pub fn open_default() -> Result<Self> {
         let path = cache_db_path()?;
         Self::open(&path)
     }
 
     /// Open the cache at an explicit path, building it if absent.
-    pub fn open(db_path: &Path) -> anyhow::Result<Self> {
+    pub fn open(db_path: &Path) -> Result<Self> {
         Ok(Self {
             conn: load_cache(db_path)?,
         })
@@ -41,12 +42,12 @@ impl GeneNormalizer {
         aliases: &[&str],
         species: Option<&str>,
         ignore_case: bool,
-    ) -> anyhow::Result<Vec<(String, Vec<GeneRecord>)>> {
+    ) -> Result<Vec<(String, Vec<GeneRecord>)>> {
         cache::lookup(&self.conn, aliases, species, ignore_case)
     }
 
     /// The `genes` table columns, in order — i.e. the cached TSV header.
-    pub fn columns(&self) -> anyhow::Result<Vec<String>> {
+    pub fn columns(&self) -> Result<Vec<String>> {
         gene_columns(&self.conn)
     }
 
